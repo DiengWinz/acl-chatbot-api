@@ -33,21 +33,69 @@ class RAGService:
         self.is_initialized = False
         self.stats = {}
 
-    # Mapping pays → mots-clés présents dans les noms de dossiers/fichiers
+    # =========================================================
+    # MAPPING INTELLIGENT : pays → fichiers/dossiers associés
+    # Toutes les variantes sont normalisées automatiquement
+    # =========================================================
     COUNTRY_MAPPING = {
-        "senegal":    ["acl_sn", "faq_data", "citizenlab", "mission_citizen", "programme", "scrap_site", "citizenlab_team", "citizenlab_rag"],
-        "sénégal":    ["acl_sn", "faq_data", "citizenlab", "mission_citizen", "programme", "scrap_site", "citizenlab_team", "citizenlab_rag"],
-        "benin":      ["acl_benin"],
-        "bénin":      ["acl_benin"],
-        "cameroun":   ["acl_cameroun"],
-        "cameroon":   ["acl_cameroun"],
-        "chad":       ["acl_chad"],
-        "tchad":      ["acl_chad"],
-        "guinee":     ["acl_guinee"],
-        "guinée":     ["acl_guinee"],
+        # Sénégal → dossier ACL_Sn + tous les fichiers CitizenLab Sénégal
+        "senegal": [
+            "acl_sn", "faq_data", "citizenlab_rag_clean",
+            "citizenlab_team", "mission_citizenlab",
+            "programme", "scrap_site"
+        ],
+        # Bénin
+        "benin": ["acl_benin"],
+        # Cameroun
+        "cameroun": ["acl_cameroun"],
+        "cameroon": ["acl_cameroun"],
+        # Tchad
+        "tchad": ["acl_chad"],
+        "chad": ["acl_chad"],
+        # Guinée
+        "guinee": ["acl_guinee"],
+        # Madagascar
         "madagascar": ["acl_madagascar"],
-        "mauritania": ["acl_mauritania"],
+        # Mauritanie
         "mauritanie": ["acl_mauritania"],
+        "mauritania": ["acl_mauritania"],
+    }
+
+    # Variantes orthographiques → clé canonique normalisée
+    COUNTRY_ALIASES = {
+        "senegal":    "senegal",
+        "sénégal":    "senegal",
+        "Senegal":    "senegal",
+        "Sénégal":    "senegal",
+        "SENEGAL":    "senegal",
+        "benin":      "benin",
+        "bénin":      "benin",
+        "Benin":      "benin",
+        "Bénin":      "benin",
+        "BENIN":      "benin",
+        "cameroun":   "cameroun",
+        "Cameroun":   "cameroun",
+        "cameroon":   "cameroun",
+        "Cameroon":   "cameroun",
+        "CAMEROUN":   "cameroun",
+        "tchad":      "tchad",
+        "Tchad":      "tchad",
+        "chad":       "tchad",
+        "Chad":       "tchad",
+        "TCHAD":      "tchad",
+        "guinee":     "guinee",
+        "guinée":     "guinee",
+        "Guinee":     "guinee",
+        "Guinée":     "guinee",
+        "GUINEE":     "guinee",
+        "madagascar": "madagascar",
+        "Madagascar": "madagascar",
+        "MADAGASCAR": "madagascar",
+        "mauritanie": "mauritanie",
+        "Mauritanie": "mauritanie",
+        "mauritania": "mauritanie",
+        "Mauritania": "mauritanie",
+        "MAURITANIE": "mauritanie",
     }
 
     def _normalize(self, text: str) -> str:
@@ -56,21 +104,47 @@ class RAGService:
         nfkd = unicodedata.normalize('NFKD', text)
         return ''.join(c for c in nfkd if not unicodedata.combining(c))
 
-    def _get_country_keywords(self, country: str) -> List[str]:
-        """Retourne les mots-clés fichiers/dossiers associés à un pays"""
+    def _resolve_country(self, country: str) -> Optional[str]:
+        """
+        Résout n'importe quelle variante d'un pays vers sa clé canonique.
+        Ex: 'Bénin', 'BENIN', 'benin' → 'benin'
+        """
+        # Essai direct dans les aliases
+        if country in self.COUNTRY_ALIASES:
+            return self.COUNTRY_ALIASES[country]
+        # Essai normalisé
         country_norm = self._normalize(country)
-        # Cherche dans le mapping avec normalisation
-        for key, keywords in self.COUNTRY_MAPPING.items():
-            if self._normalize(key) == country_norm:
-                return keywords
-        # Fallback : utilise le nom tel quel
-        return [country_norm]
+        for alias, canonical in self.COUNTRY_ALIASES.items():
+            if self._normalize(alias) == country_norm:
+                return canonical
+        return None
 
-    def _detect_country_in_query(self, query_normalized: str) -> List[str]:
-        """Détecte automatiquement un pays mentionné dans la question"""
-        for key, keywords in self.COUNTRY_MAPPING.items():
-            if self._normalize(key) in query_normalized:
+    def _get_country_keywords(self, country: str) -> List[str]:
+        """Retourne les mots-clés fichiers/dossiers pour un pays donné"""
+        canonical = self._resolve_country(country)
+        if canonical and canonical in self.COUNTRY_MAPPING:
+            return self.COUNTRY_MAPPING[canonical]
+        # Fallback : utilise le nom normalisé directement
+        return [self._normalize(country)]
+
+    def _detect_country_in_query(self, query: str) -> List[str]:
+        """
+        Détecte intelligemment un pays dans la question.
+        Fonctionne avec accents, majuscules, fautes légères.
+        """
+        query_normalized = self._normalize(query)
+
+        # Cherche chaque alias dans la query normalisée
+        for alias in self.COUNTRY_ALIASES:
+            alias_normalized = self._normalize(alias)
+            # Vérifie que c'est un mot entier (pas juste une sous-chaîne)
+            pattern = r'\b' + re.escape(alias_normalized) + r'\b'
+            if re.search(pattern, query_normalized):
+                canonical = self.COUNTRY_ALIASES[alias]
+                keywords = self.COUNTRY_MAPPING.get(canonical, [alias_normalized])
+                logger.debug(f"🌍 Pays détecté: '{alias}' → canonical: '{canonical}' → keywords: {keywords}")
                 return keywords
+
         return []
 
     def initialize(self, knowledge_base_dir: str = "knowledge_base"):
@@ -200,22 +274,21 @@ class RAGService:
         stopwords = {
             'les', 'des', 'une', 'que', 'qui', 'pour', 'the', 'and', 'for',
             'quels', 'comment', 'what', 'how', 'est', 'sont', 'avec', 'dans',
-            'cest', 'quoi', 'vous', 'nous', 'ils', 'elles', 'votre', 'notre'
+            'cest', 'quoi', 'vous', 'nous', 'ils', 'elles', 'votre', 'notre',
+            'africtivistes', 'citizenlab', 'acl'
         }
 
         query_normalized = self._normalize(query)
         query_keywords = set(re.findall(r'\b\w{3,}\b', query_normalized)) - stopwords
 
-        # Détermine les mots-clés pays à utiliser
+        # Résolution du pays : filtre explicite OU détection dans la query
         if country_filter:
-            # Pays fourni explicitement → utilise le mapping
             country_keywords = self._get_country_keywords(country_filter)
-            logger.debug(f"🌍 Filtre pays '{country_filter}' → keywords: {country_keywords}")
+            logger.debug(f"🌍 Filtre explicite '{country_filter}' → {country_keywords}")
         else:
-            # Détection automatique du pays dans la question
-            country_keywords = self._detect_country_in_query(query_normalized)
+            country_keywords = self._detect_country_in_query(query)
             if country_keywords:
-                logger.debug(f"🔍 Pays détecté dans la query → keywords: {country_keywords}")
+                logger.debug(f"🔍 Pays auto-détecté → {country_keywords}")
 
         scored_chunks = []
 
@@ -223,7 +296,7 @@ class RAGService:
             folder_normalized = self._normalize(chunk.metadata.get("folder", ""))
             source_normalized = self._normalize(chunk.source_file)
 
-            # Filtre par pays si des mots-clés ont été détectés
+            # Filtre pays intelligent
             if country_keywords:
                 match = any(
                     kw in folder_normalized or kw in source_normalized
@@ -247,9 +320,9 @@ class RAGService:
             if score > 0:
                 scored_chunks.append((chunk, min(score, 1.0)))
 
-        # Fallback : si aucun résultat avec filtre pays → cherche sans filtre
+        # Fallback global si aucun résultat avec filtre pays
         if not scored_chunks and country_keywords:
-            logger.warning(f"⚠️ Aucun résultat avec filtre pays, recherche globale...")
+            logger.warning("⚠️ Aucun résultat avec filtre pays → fallback recherche globale")
             return self.search(query=query, top_k=top_k, country_filter=None)
 
         scored_chunks.sort(key=lambda x: x[1], reverse=True)
